@@ -1,0 +1,186 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "Azure DevOps Boards WIQL API",
+        "description": "API para consultar Azure DevOps Boards usando WIQL.",
+        "contact": {
+            "name": "Thiago Salles",
+            "email": "thiagosalles@microsoft.com"
+        },
+        "license": {
+            "name": "MIT",
+            "url": "https://opensource.org/licenses/MIT"
+        },
+        "version": "1.0.0"
+    },
+    "servers": [
+        {
+            "url": "TO_BE_DEFINED",
+            "description": "Azure App Function deployment URL"
+        }
+    ],
+    "paths": {
+        "/v1/wiql": {
+            "post": {
+                "tags": [
+                    "Azure Boards WIQL"
+                ],
+                "summary": "Executa uma consulta WIQL",
+                "description": "Executa uma consulta WIQL no Azure DevOps Boards e retorna os itens de trabalho correspondentes.",
+                "operationId": "azure_board_query_v1_wiql_post",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/WIQLRequestBody"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "additionalProperties": {
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "type": "object",
+                                    "title": "Response Azure Board Query V1 Wiql Post"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "HTTPValidationError": {
+                "properties": {
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/ValidationError"
+                        },
+                        "type": "array",
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "title": "HTTPValidationError"
+            },
+            "ValidationError": {
+                "properties": {
+                    "loc": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array",
+                        "title": "Location"
+                    },
+                    "msg": {
+                        "type": "string",
+                        "title": "Message"
+                    },
+                    "type": {
+                        "type": "string",
+                        "title": "Error Type"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "loc",
+                    "msg",
+                    "type"
+                ],
+                "title": "ValidationError"
+            },
+            "WIQLQueryParams": {
+                "properties": {
+                    "days_back": {
+                        "type": "integer",
+                        "title": "Days Back",
+                        "description": "Number of days back from today",
+                        "default": 60
+                    },
+                    "excluded_states": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array",
+                        "title": "Excluded States"
+                    },
+                    "area_paths": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array",
+                        "title": "Area Paths",
+                        "description": "List of area paths to filter by. If empty, no area path filter is applied."
+                    }
+                },
+                "type": "object",
+                "title": "WIQLQueryParams",
+                "description": "Parameters for the WIQL query."
+            },
+            "WIQLRequestBody": {
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "title": "Query"
+                    },
+                    "top": {
+                        "type": "integer",
+                        "title": "Top",
+                        "description": "Max number of work items to return",
+                        "default": 50
+                    },
+                    "timeprecision": {
+                        "type": "boolean",
+                        "title": "Timeprecision",
+                        "description": "Whether to include time precision in the query",
+                        "default": true
+                    },
+                    "parameters": {
+                        "$ref": "#/components/schemas/WIQLQueryParams"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "query"
+                ],
+                "title": "WIQLRequestBody",
+                "description": "Request body for the WIQL query endpoint."
+            }
+        }
+    },
+    "tags": [
+        {
+            "name": "Azure Boards WIQL",
+            "description": "Endpoints para consultar Azure DevOps Boards usando WIQL."
+        }
+    ]
+}
