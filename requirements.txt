@@ -8,5 +8,5 @@ azure-ai-projects
 azure-identity
 beautifulsoup4
 lxml
-requests
+dotenv
 fastapi

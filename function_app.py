@@ -15,6 +15,7 @@ load_dotenv()
 
 class AzureDevOpsConfig(BaseModel):
     """Configuration for Azure DevOps connection."""
+    query: str = Field(..., description="WIQL query string")
     base_url: HttpUrl = Field(..., description="Base WIQL API URL")
     organization: str = Field(..., description="Azure DevOps Organization name")
     team: str = Field(..., description="Azure DevOps Team name")
@@ -32,7 +33,8 @@ class WIQLQueryParams(BaseModel):
 
 class WIQLRequestBody(BaseModel):
     """Request body for the WIQL query endpoint."""
-    query: str
+    pat: str = Field(..., description="Personal Access Token for Azure DevOps")
+    query: str = Field(..., description="WIQL query string")
     top: int = Field(default=50, description="Max number of work items to return")
     timeprecision: bool = Field(default=True, description="Whether to include time precision in the query")
     parameters: WIQLQueryParams = Field(default_factory=lambda: WIQLQueryParams())
@@ -75,10 +77,11 @@ def get_work_items(wiql_query: str, config: AzureDevOpsConfig) -> List[str]:
     return work_items 
 
 
-def build_query(params: WIQLQueryParams, team: str) -> str:
+def build_query(params: WIQLQueryParams, config: AzureDevOpsConfig) -> str:
     """
     Builds the WIQL query string with given parameters.
     """
+    team = config.team
     excluded_states_str = ", ".join(f"'{state}'" for state in params.excluded_states)
 
     area_path_filter = ""
@@ -118,7 +121,7 @@ def run_wiql_query(config: AzureDevOpsConfig, params: WIQLQueryParams) -> List[s
     """
     Executes the WIQL query against Azure DevOps Boards.
     """
-    query_str = build_query(params, config.team)
+    query_str = config.query if config.query else build_query(params, config)
     return get_work_items(query_str, config)
 
 
@@ -134,18 +137,41 @@ def build_work_item(work_item) -> str:
     """
     Builds a string representation of the work item.
     """
-    if "System.Description" in work_item.fields and work_item.fields["System.Description"]:
-        decoded_str = work_item.fields["System.Description"].encode().decode("unicode_escape")
-        soup = BeautifulSoup(decoded_str, "html.parser")
-        description = soup.get_text(separator=" ")
-        description = html.unescape(description)
-        return "{0} {1}: {2} - {3}".format(
-            work_item.fields["System.WorkItemType"],
-            work_item.id,
-            work_item.fields["System.Title"],
-            description,
-        )
-    return ""
+    allowed_fields = [
+        "System.Id",
+        "System.Title",
+        "System.WorkItemType",
+        "System.State",
+        "System.AreaPath",
+        "System.AssignedTo",
+        "System.Tags",
+        "System.Description",
+        "System.Parent",
+        "Custom.GanhoQuantitativo",
+        "Custom.Metadiretoriaassociada",
+        "Custom.MetaEloassociada",
+        "Custom.Classification",
+        "Custom.TipodeIniciativa",
+        "Custom.Vertical",
+        "Custom.Temdependencia",
+        "Custom.Acatado",
+        "Custom.GrauWSprints",
+        "Custom.Stakeholders"
+    ]
+    if "System.Description" in work_item.fields:
+        lines = []
+        for f in allowed_fields:
+            if f == "System.Description" and f in work_item.fields and work_item.fields[f]:
+                try:
+                    decoded_str = work_item.fields[f].encode().decode("unicode_escape")
+                except:
+                    decoded_str = work_item.fields[f]
+                soup = BeautifulSoup(decoded_str, "html.parser")
+                description = html.unescape(soup.get_text(separator=" "))
+                lines.append(f"System.Description: {description}")
+            elif f in work_item.fields:
+                lines.append(f"{f}: {work_item.fields[f]}")
+        return "\n".join(lines)
     
 
 fapi_app = fastapi.FastAPI(
@@ -179,12 +205,13 @@ fapi_app = fastapi.FastAPI(
 def azure_board_query(req: WIQLRequestBody) -> Response:
     logging.info('Python HTTP trigger function processed a request.')
     config = AzureDevOpsConfig(
-        base_url=os.getenv("ADO_BASE_URL", "https://dev.azure.com/"),
+        query=req.query,
+        base_url=os.getenv("ADO_BASE_URL", "https://dev.azure.com/"), # type: ignore
         organization=os.getenv("ADO_ORGANIZATION", "elobr"),
         team=os.getenv("ADO_TEAM", "Elo"),
         project=os.getenv("ADO_PROJECT", "Estrategia%20e%20Transformacao"),
-        personal_access_token=os.getenv("ADO_PAT", ""),
-        top=int(os.getenv("ADO_TOP", 50))
+        personal_access_token=req.pat if req.pat else os.getenv("ADO_PAT", ""),
+        top=int(req.top if req.top else os.getenv("ADO_TOP", req.top))
     )
 
     params = WIQLQueryParams(
