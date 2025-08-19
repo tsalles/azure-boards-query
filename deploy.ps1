@@ -1,6 +1,11 @@
 
-$resourceGroup = $args[0]
-$functionAppName = $args[1]
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$resourceGroup,
+    [Parameter(Mandatory=$true)]
+    [string]$functionApp
+)
 
 
 $FolderPath = Get-Location
@@ -13,4 +18,4 @@ $Exclude = Import-Csv -Path $FuncIgnorePath -Header "Exclude"
 $Files = Get-ChildItem -Path $FolderPath -Exclude $Exclude.Exclude
 Compress-Archive -Path $Files -DestinationPath $Destination -CompressionLevel Fastest
 
-az functionapp deployment source config-zip -g $resourceGroup -n $functionAppName --src $Destination
+az functionapp deployment source config-zip -g $resourceGroup -n $functionApp --src $Destination
