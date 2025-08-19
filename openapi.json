@@ -16,7 +16,7 @@
     "servers": [
         {
             "url": "TO_BE_DEFINED",
-            "description": "Azure App Function deployment URL"
+            "description": "Microserviço para interação com Azure DevOps Boards usando WIQL."
         }
     ],
     "paths": {
@@ -27,7 +27,7 @@
                 ],
                 "summary": "Executa uma consulta WIQL",
                 "description": "Executa uma consulta WIQL no Azure DevOps Boards e retorna os itens de trabalho correspondentes.",
-                "operationId": "azure_board_query_v1_wiql_post",
+                "operationId": "WIQLQuery",
                 "requestBody": {
                     "content": {
                         "application/json": {
@@ -44,14 +44,7 @@
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "additionalProperties": {
-                                        "items": {
-                                            "type": "string"
-                                        },
-                                        "type": "array"
-                                    },
-                                    "type": "object",
-                                    "title": "Response Azure Board Query V1 Wiql Post"
+                                    "$ref": "#/components/schemas/Response"
                                 }
                             }
                         }
@@ -84,6 +77,24 @@
                 },
                 "type": "object",
                 "title": "HTTPValidationError"
+            },
+            "Response": {
+                "properties": {
+                    "work_items": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array",
+                        "title": "Work Items",
+                        "description": "List of work items returned by the WIQL query"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "work_items"
+                ],
+                "title": "Response",
+                "description": "Response model for the WIQL query endpoint."
             },
             "ValidationError": {
                 "properties": {
@@ -131,7 +142,17 @@
                             "type": "string"
                         },
                         "type": "array",
-                        "title": "Excluded States"
+                        "title": "Excluded States",
+                        "description": "List of states to exclude from the query. If empty, defaults to common closed states.",
+                        "examples": [
+                            [
+                                "Completed",
+                                "Canceled",
+                                "Done",
+                                "Closed",
+                                "Resolved"
+                            ]
+                        ]
                     },
                     "area_paths": {
                         "items": {
@@ -139,7 +160,46 @@
                         },
                         "type": "array",
                         "title": "Area Paths",
-                        "description": "List of area paths to filter by. If empty, no area path filter is applied."
+                        "description": "List of area paths to filter by. If empty, no area path filter is applied.",
+                        "examples": [
+                            [
+                                "Elo\\Meios de Pagamento e Anti Fraude\\Meios de Pagamento\\Credenciais de Pagamentos",
+                                "Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Compra Online"
+                            ]
+                        ]
+                    },
+                    "value_filters": {
+                        "additionalProperties": {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        "type": "object",
+                        "title": "Value Filters",
+                        "description": "Value based filters for the WIQL query. Format: {'field_name': ['values']}. Checks if work_item[field_name] is in values list.",
+                        "examples": [
+                            {
+                                "System.State": [
+                                    "Active",
+                                    "New"
+                                ]
+                            }
+                        ]
+                    },
+                    "keyword_filters": {
+                        "additionalProperties": {
+                            "type": "string"
+                        },
+                        "type": "object",
+                        "title": "Keyword Filters",
+                        "description": "Keyword based filters for the WIQL query. Format: {'field_name': 'keyword'}. Checks if work_item[field_name] contains keyword.",
+                        "examples": [
+                            {
+                                "System.Description": "Lyra",
+                                "System.Title": "fraude"
+                            }
+                        ]
                     }
                 },
                 "type": "object",
@@ -148,9 +208,10 @@
             },
             "WIQLRequestBody": {
                 "properties": {
-                    "query": {
+                    "pat": {
                         "type": "string",
-                        "title": "Query"
+                        "title": "Pat",
+                        "description": "Personal Access Token for Azure DevOps"
                     },
                     "top": {
                         "type": "integer",
@@ -158,19 +219,13 @@
                         "description": "Max number of work items to return",
                         "default": 50
                     },
-                    "timeprecision": {
-                        "type": "boolean",
-                        "title": "Timeprecision",
-                        "description": "Whether to include time precision in the query",
-                        "default": true
-                    },
                     "parameters": {
                         "$ref": "#/components/schemas/WIQLQueryParams"
                     }
                 },
                 "type": "object",
                 "required": [
-                    "query"
+                    "pat"
                 ],
                 "title": "WIQLRequestBody",
                 "description": "Request body for the WIQL query endpoint."
