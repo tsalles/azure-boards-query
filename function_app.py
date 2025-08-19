@@ -1,9 +1,10 @@
 import azure.functions as func
 from azure.devops.v7_0.work_item_tracking.work_item_tracking_client import WorkItemTrackingClient
+from azure.devops.v7_0.work_item_tracking.models import WorkItemQueryResult
 import logging
 import os
 import base64
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, Field, HttpUrl
 from azure.devops.connection import Connection
 from msrest.authentication import BasicAuthentication
@@ -14,24 +15,6 @@ from dotenv import load_dotenv
 load_dotenv()
 from loguru import logger 
 
-allowed_fields = [
-    'System.AssignedTo',
-    'System.Id',
-    'System.AreaPath',
-    'System.WorkItemType',
-    'System.Title',
-    'System.Description',
-    'System.Parent',
-    'System.State',
-    'System.Tags',
-    'Custom.Metadiretoriaassociada',
-    'Custom.MetaEloassociada',
-    'Custom.MetaEloAssociada2',
-    'Custom.Classification',
-    'Custom.TipodeIniciativa',
-    'Custom.Vertical',
-    'Custom.Qualoproblemaoudordoclienteaserresolvido'
-]
 
 WIQL_TEMPLATE = """
 SELECT
@@ -47,6 +30,25 @@ WHERE
 ORDER BY
    [System.ChangedDate] DESC
 """
+
+allowed_fields_default = {
+    'System.Id': {'name': 'System.Id', 'title': 'ID'},
+    'System.WorkItemType': {'name': 'System.WorkItemType', 'title': 'Work Item Type'},
+    'System.Title': {'name': 'System.Title', 'title': 'Title'},
+    'System.State': {'name': 'System.State', 'title': 'State'},
+    'Microsoft.VSTS.Scheduling.Effort': {'name': 'Microsoft.VSTS.Scheduling.Effort', 'title': 'Effort'},
+    'Microsoft.VSTS.Common.BusinessValue': {'name': 'Microsoft.VSTS.Common.BusinessValue', 'title': 'Business Value'},
+    'Microsoft.VSTS.Common.ValueArea': {'name': 'Microsoft.VSTS.Common.ValueArea', 'title': 'Qual o problema ou dor do cliente a ser resolvido'},
+    'System.Tags': {'name': 'System.Tags', 'title': 'Tags'},
+    'System.Description': {'name': 'System.Description', 'title': 'Description'},
+    'Custom.TipodeIniciativa': {'name': 'Custom.TipodeIniciativa', 'title': 'Tipo de Iniciativa'},
+    'Custom.05912272-678c-4f26-8aa7-72eba9b2a56a': {'name': 'Custom.05912272-678c-4f26-8aa7-72eba9b2a56a', 'title': 'Projeto Estratégico'},
+    'Custom.MetaEloassociada': {'name': 'Custom.MetaEloassociada', 'title': 'Meta Elo associada'},
+    'Custom.MetaEloAssociada2': {'name': 'Custom.MetaEloAssociada2', 'title': 'Meta Elo Associada 2'},
+    'Custom.Metadiretoriaassociada': {'name': 'Custom.Metadiretoriaassociada', 'title': 'Meta diretoria associada'},
+    'Custom.GanhoQuantitativo': {'name': 'Custom.GanhoQuantitativo', 'title': 'Ganho Quantitativo'}
+}
+
 
 class AzureDevOpsConfig(BaseModel):
     """Configuration for Azure DevOps connection."""
@@ -75,6 +77,12 @@ class WIQLQueryParams(BaseModel):
     keyword_filters: dict[str, str] = Field(default_factory=dict,
                                             description="Keyword based filters for the WIQL query. Format: {'field_name': 'keyword'}. Checks if work_item[field_name] contains keyword.",
                                             examples=[{"System.Title": "fraude", "System.Description": "Lyra"}])
+    query: Optional[str] = Field(default=None, description="Custom WIQL query. If provided, it overrides other parameters.")
+    allowed_fields: dict[str, dict[str, str]] = Field(
+        default=allowed_fields_default,
+        description="Dictionary of allowed fields with their names and titles. Used to build the WIQL query.",
+        title="Allowed Fields"
+    )
 
 
 class WIQLRequestBody(BaseModel):
@@ -86,7 +94,9 @@ class WIQLRequestBody(BaseModel):
 
 class Response(BaseModel):
     """Response model for the WIQL query endpoint."""
-    work_items: List[str] = Field(..., description="List of work items returned by the WIQL query") 
+    # work_items: List[str] = Field(..., description="List of work items returned by the WIQL query") 
+    header: List[str] = Field(..., description="List of column titles for the work items")
+    values: List[List[str]] = Field(..., description="List of work item rows, each as a list of values")
 
 
 def get_ado_client(config: AzureDevOpsConfig) -> WorkItemTrackingClient:
@@ -96,93 +106,106 @@ def get_ado_client(config: AzureDevOpsConfig) -> WorkItemTrackingClient:
     return connection.clients.get_work_item_tracking_client()
 
 
-def get_work_items(params: WIQLQueryParams, config: AzureDevOpsConfig) -> List[str]:
+def get_work_items(params: WIQLQueryParams, config: AzureDevOpsConfig) -> List[List[str]]:
     """
     Executes the WIQL query and retrieves work items from Azure DevOps Boards.
     """
     client = get_ado_client(config)
-    wiql = build_query(params, config)
-    result = client.query_by_wiql({'query': wiql}, top=config.top, time_precision=True)
-    logger.info(f"WIQL Query executed. Found {len(result.work_items)} work items.")
-    work_items = []
-    ids = [item.id for item in result.work_items]
+    wiql = build_query(params, config, query=params.query)
+    result: WorkItemQueryResult = client.query_by_wiql({'query': wiql}, top=config.top, time_precision=True)
+
+    work_items = getattr(result, 'work_items', None)
+    ids = []
+    if work_items:
+        logger.info(work_items[0] if work_items else "No work items found.")
+        ids = [item.id for item in work_items]
+    elif hasattr(result, 'work_item_relations') and result.work_item_relations:
+        logger.info("Using work_item_relations for IDs.")
+        ids = [rel.target.id for rel in result.work_item_relations if hasattr(rel, 'target') and hasattr(rel.target, 'id')]
+    else:
+        logger.info("No work items or work item relations found.")
+        return []
     if not ids:
         logger.info("No work items found.")
-        return work_items
+        return []
     
     batch_size = 199
+    values = []
+    sorted_fields = sorted(params.allowed_fields.keys())
     for i in range(0, len(ids), batch_size):
         batch_ids = ids[i:i+batch_size]
         batch_items = client.get_work_items(batch_ids, expand='all')
         for work_item in batch_items:
-            wi: str = build_work_item(work_item)
-            if wi: 
-                work_items.append(wi)
-    logger.info(f"Retrieved {len(work_items)} work items after processing batches.")
-    return work_items 
+            wi: List[str] = build_work_item(work_item, sorted_fields=sorted_fields)
+            if wi:
+                values.append(wi)
+    logger.info(f"Retrieved {len(values)} work items after processing batches.")
+    return values
 
 
-def build_query(params: WIQLQueryParams, config: AzureDevOpsConfig) -> str:
+def build_query(params: WIQLQueryParams, config: AzureDevOpsConfig, query: Optional[str]) -> str:
     """
     Builds the WIQL query string with given parameters.
     """
     team = config.team
     
-    clauses = []
+    if not query:
+        clauses = []
 
-    excluded_states = params.excluded_states or ["Completed", "Canceled", "Done", "Closed", "Resolved"]
-    if excluded_states:
-        excluded_states_str = ", ".join(f"'{state}'" for state in excluded_states)
-        clauses.append(f"[System.State] NOT IN ({excluded_states_str})")
+        excluded_states = params.excluded_states or ["Completed", "Canceled", "Done", "Closed", "Resolved"]
+        if excluded_states:
+            excluded_states_str = ", ".join(f"'{state}'" for state in excluded_states)
+            clauses.append(f"[System.State] NOT IN ({excluded_states_str})")
 
-    area_path_filter = ""
-    area_paths = params.area_paths
-    if not area_paths:
-        area_paths = [
-            'Elo\\Meios de Pagamento e Anti Fraude\\Meios de Pagamento\\Credenciais de Pagamentos',
-            'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Compra Online',
-            'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Demandas a Prev Fraude',
-            'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Transacional',
-            'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Validação Cadastral',
-            'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Consórcio combate a fraudes'
-        ]
-    if len(params.area_paths) == 1:
-        area_path = params.area_paths[0].replace("'", "\\'")
-        area_path_filter = f"AND ([System.AreaPath] UNDER '{area_path}') "
-    else:
-        or_conditions = " OR ".join(
-            "[System.AreaPath] UNDER '"+ap.replace("'", "\\'")+"'" for ap in params.area_paths
+        area_path_filter = ""
+        area_paths = params.area_paths
+        if not area_paths:
+            area_paths = [
+                'Elo\\Meios de Pagamento e Anti Fraude\\Meios de Pagamento\\Credenciais de Pagamentos',
+                'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Compra Online',
+                'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Demandas a Prev Fraude',
+                'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Transacional',
+                'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Validação Cadastral',
+                'Elo\\Meios de Pagamento e Anti Fraude\\Anti-Fraude\\Consórcio combate a fraudes'
+            ]
+        if len(params.area_paths) == 1:
+            area_path = params.area_paths[0].replace("'", "\\'")
+            area_path_filter = f"AND ([System.AreaPath] UNDER '{area_path}') "
+        else:
+            or_conditions = " OR ".join(
+                "[System.AreaPath] UNDER '"+ap.replace("'", "\\'")+"'" for ap in params.area_paths
+            )
+            area_path_filter = f"AND ( {or_conditions} ) "
+        clauses.append(area_path_filter)
+
+        value_filters = params.value_filters
+        keyword_filters = params.keyword_filters
+
+        clauses = []
+        if value_filters:
+            for field, values in value_filters.items():
+                if values:
+                    values_list = [f"'{v}'" for v in values]
+                    clauses.append(f"[{field}] IN ({','.join(values_list)})")
+
+        if keyword_filters:
+            for field, keyword in keyword_filters.items():
+                clauses.append(f"[{field}] CONTAINS '{keyword}'")
+
+        extra_filters = ""
+        if clauses:
+            extra_filters = " AND " + " AND ".join(clauses)
+
+        sorted_fields = sorted(params.allowed_fields.keys())
+        selected_fields = ", ".join(sorted_fields)
+        workitem_types = ["Iniciativa E2E"]
+        
+        query = WIQL_TEMPLATE.format(
+            selected_fields=selected_fields,
+            workitem_types=", ".join(f"'{wi}'" for wi in workitem_types),
+            extra_filters=extra_filters,
+            team=team or 'Elo'
         )
-        area_path_filter = f"AND ( {or_conditions} ) "
-    clauses.append(area_path_filter)
-
-    value_filters = params.value_filters
-    keyword_filters = params.keyword_filters
-
-    clauses = []
-    if value_filters:
-        for field, values in value_filters.items():
-            if values:
-                values_list = [f"'{v}'" for v in values]
-                clauses.append(f"[{field}] IN ({','.join(values_list)})")
-
-    if keyword_filters:
-        for field, keyword in keyword_filters.items():
-            clauses.append(f"[{field}] CONTAINS '{keyword}'")
-
-    extra_filters = ""
-    if clauses:
-        extra_filters = " AND " + " AND ".join(clauses)
-
-    selected_fields = ", ".join(allowed_fields)
-    workitem_types = ["Iniciativa E2E"]
-    
-    query = WIQL_TEMPLATE.format(
-        selected_fields=selected_fields,
-        workitem_types=", ".join(f"'{wi}'" for wi in workitem_types),
-        extra_filters=extra_filters,
-        team=team or 'Elo'
-    )
     logger.info(f"Built WIQL query: {query}")
     return query
 
@@ -197,23 +220,26 @@ def get_auth_header(token: str) -> dict[str, str]:
     return {"Authorization": f"Basic {encoded_credentials}"}
 
 
-def build_work_item(work_item) -> str:
+def build_work_item(work_item, sorted_fields: List[str]) -> List[str]:
     """
     Builds a string representation of the work item.
     """
-    lines = []
-    for f in allowed_fields:
-        if f == "System.Description" and f in work_item.fields and work_item.fields[f]:
-            try:
-                decoded_str = work_item.fields[f].encode().decode("unicode_escape")
-            except:
-                decoded_str = work_item.fields[f]
-            soup = BeautifulSoup(decoded_str, "html.parser")
-            description = html.unescape(soup.get_text(separator=" "))
-            lines.append(f"System.Description: {description}")
-        elif f in work_item.fields:
-            lines.append(f"{f}: {work_item.fields[f]}")
-    return "\n".join(lines)
+    columns = []
+    for f in sorted_fields:
+        if f in work_item.fields and work_item.fields[f]:
+            value = work_item.fields[f]
+            if f == "System.Description":
+                try:
+                    value = work_item.fields[f].encode().decode("unicode_escape")
+                except:
+                    pass
+                soup = BeautifulSoup(value, "html.parser")
+                value = html.unescape(soup.get_text(separator=" "))
+        else:
+            value = ""
+        columns.append(str(value))
+            
+    return columns
     
 
 fapi_app = fastapi.FastAPI(
@@ -256,14 +282,20 @@ def azure_board_query(req: WIQLRequestBody) -> Response:
         top = int(req.top or os.getenv("ADO_TOP", 50))
     )
 
+    allowed_fields = req.parameters.allowed_fields or allowed_fields_default
     params = WIQLQueryParams(
         days_back=int(os.getenv("ADO_DAYS_BACK", 60)),
         excluded_states=os.getenv("ADO_EXCLUDED_STATES", "Completed,Canceled,Done,Resolved,Closed").split(","),
+        area_paths=req.parameters.area_paths,
+        value_filters=req.parameters.value_filters,
+        keyword_filters=req.parameters.keyword_filters,
+        query=req.parameters.query,
+        allowed_fields=allowed_fields
     )
-
+    sorted_fields = sorted(allowed_fields.keys())
     work_items = get_work_items(params, config)
     logger.info(f"Found {len(work_items)} work items.")
-    logger.info(f"Types: {type(work_items)} of {type(work_items[0]) if work_items else 'None'}")
-    return Response(work_items=work_items)
+    return Response(header=[allowed_fields[h]['title'] for h in sorted_fields],
+                    values=work_items)
     
 app = func.AsgiFunctionApp(app=fapi_app, http_auth_level=func.AuthLevel.ANONYMOUS)
