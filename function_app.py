@@ -18,8 +18,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 security = HTTPBasic()
-API_USERNAME = os.getenv("API_USERNAME", "admin")
-API_PASSWORD = os.getenv("API_PASSWORD", "password")
+API_USERNAME = os.getenv("API_USERNAME", "apiuser")
+API_PASSWORD = os.getenv("API_PASSWORD", "apipass")
 
 def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
     correct_username = secrets.compare_digest(credentials.username, API_USERNAME)
