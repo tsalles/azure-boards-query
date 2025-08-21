@@ -104,7 +104,7 @@ class WIQLQueryParams(BaseModel):
 
 class WIQLRequestBody(BaseModel):
     """Request body for the WIQL query endpoint."""
-    pat: str = Field(..., description="Personal Access Token for Azure DevOps")
+    pat: str = Field(default='', description="Personal Access Token for Azure DevOps")
     top: int = Field(default=50, description="Max number of work items to return")
     parameters: WIQLQueryParams = Field(default_factory=lambda: WIQLQueryParams())
 
@@ -289,7 +289,7 @@ fapi_app = fastapi.FastAPI(
     description="Executa uma consulta WIQL no Azure DevOps Boards e retorna os itens de trabalho correspondentes."
 )
 def azure_board_query(req: WIQLRequestBody, username: str = Depends(authenticate)) -> Response:
-    logging.info('Python HTTP trigger function processed a request.')
+    logger.info('Python HTTP trigger function processed a request.')
     config = AzureDevOpsConfig(
         base_url=os.getenv("ADO_BASE_URL", "https://dev.azure.com/"), # type: ignore
         organization=os.getenv("ADO_ORGANIZATION", "elobr"),
