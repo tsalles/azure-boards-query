@@ -4,7 +4,6 @@ import secrets
 import azure.functions as func
 from azure.devops.v7_0.work_item_tracking.work_item_tracking_client import WorkItemTrackingClient
 from azure.devops.v7_0.work_item_tracking.models import WorkItemQueryResult
-import logging
 import os
 import base64
 from typing import List, Optional
