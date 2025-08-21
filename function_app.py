@@ -1,3 +1,6 @@
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, HTTPException, status
+import secrets
 import azure.functions as func
 from azure.devops.v7_0.work_item_tracking.work_item_tracking_client import WorkItemTrackingClient
 from azure.devops.v7_0.work_item_tracking.models import WorkItemQueryResult
@@ -11,9 +14,24 @@ from msrest.authentication import BasicAuthentication
 from bs4 import BeautifulSoup
 import html
 import fastapi
+from loguru import logger 
 from dotenv import load_dotenv
 load_dotenv()
-from loguru import logger 
+
+security = HTTPBasic()
+API_USERNAME = os.getenv("API_USERNAME", "admin")
+API_PASSWORD = os.getenv("API_PASSWORD", "password")
+
+def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, API_USERNAME)
+    correct_password = secrets.compare_digest(credentials.password, API_PASSWORD)
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 
 WIQL_TEMPLATE = """
@@ -271,7 +289,7 @@ fapi_app = fastapi.FastAPI(
     summary="Executa uma consulta WIQL",
     description="Executa uma consulta WIQL no Azure DevOps Boards e retorna os itens de trabalho correspondentes."
 )
-def azure_board_query(req: WIQLRequestBody) -> Response:
+def azure_board_query(req: WIQLRequestBody, username: str = Depends(authenticate)) -> Response:
     logging.info('Python HTTP trigger function processed a request.')
     config = AzureDevOpsConfig(
         base_url=os.getenv("ADO_BASE_URL", "https://dev.azure.com/"), # type: ignore
