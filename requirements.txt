@@ -11,3 +11,4 @@ lxml
 dotenv
 fastapi
 loguru
+openai

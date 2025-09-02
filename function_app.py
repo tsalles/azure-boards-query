@@ -6,13 +6,20 @@ from azure.devops.v7_0.work_item_tracking.work_item_tracking_client import WorkI
 from azure.devops.v7_0.work_item_tracking.models import WorkItemQueryResult
 import os
 import base64
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field, HttpUrl
 from azure.devops.connection import Connection
 from msrest.authentication import BasicAuthentication
 from bs4 import BeautifulSoup
 import html
+import http.client as http_client
+
+http_client.HTTPConnection.debuglevel = 1
+
 import fastapi
+import json
+import requests
+from openai import AzureOpenAI
 from loguru import logger 
 from dotenv import load_dotenv
 load_dotenv()
@@ -116,6 +123,19 @@ class Response(BaseModel):
     values: List[List[str]] = Field(..., description="List of work item rows, each as a list of values")
 
 
+class CreateWorkItemBody(BaseModel):
+    """Request body to create a work item."""
+    pat: str = Field(default='', description="Personal Access Token for Azure DevOps")
+    organization: Optional[str] = Field(None, description="Azure DevOps organization (overrides env)")
+    project: Optional[str] = Field(None, description="Azure DevOps project (overrides env)")
+    work_item_type: str = Field(default='User Story', description="Work item type to create, e.g. 'User Story' or 'Task'")
+    description: Optional[str] = Field(None, description="Optional description text for the work item")
+    parent_id: Optional[int] = Field(None, description="Optional parent work item ID to link to")
+    fields: Dict[str, Any] = Field(..., description="Dictionary of field name -> value to set on the created work item")
+    area_path: Optional[str] = Field(None, description="Optional area path to set on the work item")
+    index: Optional[bool] = Field(False, description="Whether to index the work item in Azure Search after creation")
+
+
 def get_ado_client(config: AzureDevOpsConfig) -> WorkItemTrackingClient:
     credentials = BasicAuthentication('', config.personal_access_token)
     connection = Connection(base_url=f'{config.base_url}/{config.organization}',
@@ -129,22 +149,28 @@ def get_work_items(params: WIQLQueryParams, config: AzureDevOpsConfig) -> List[L
     """
     client = get_ado_client(config)
     wiql = build_query(params, config, query=params.query)
-    result: WorkItemQueryResult = client.query_by_wiql({'query': wiql}, top=config.top, time_precision=True)
-
+    result: Optional[WorkItemQueryResult] = None
+    try:
+        logger.info(f"Executing WIQL query: {wiql}")
+        result = client.query_by_wiql({'query': wiql}, top=config.top, time_precision=True)
+    except Exception as e:
+        logger.error(f"Error executing WIQL query: {e}")
+        return []
     work_items = getattr(result, 'work_items', None)
     ids = []
-    if work_items:
-        logger.info(work_items[0] if work_items else "No work items found.")
-        ids = [item.id for item in work_items]
-    elif hasattr(result, 'work_item_relations') and result.work_item_relations:
-        logger.info("Using work_item_relations for IDs.")
-        ids = [rel.target.id for rel in result.work_item_relations if hasattr(rel, 'target') and hasattr(rel.target, 'id')]
-    else:
-        logger.info("No work items or work item relations found.")
-        return []
-    if not ids:
-        logger.info("No work items found.")
-        return []
+    if result:
+        if work_items:
+            logger.info(work_items[0] if work_items else "No work items found.")
+            ids = [item.id for item in work_items]
+        elif hasattr(result, 'work_item_relations') and result.work_item_relations:
+            logger.info("Using work_item_relations for IDs.")
+            ids = [rel.target.id for rel in result.work_item_relations if hasattr(rel, 'target') and hasattr(rel.target, 'id')]
+        else:
+            logger.info("No work items or work item relations found.")
+            return []
+        if not ids:
+            logger.info("No work items found.")
+            return []
     
     batch_size = 199
     values = []
@@ -257,7 +283,46 @@ def build_work_item(work_item, sorted_fields: List[str]) -> List[str]:
         columns.append(str(value))
             
     return columns
-    
+
+def build_patch_document(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
+    patch = []
+    for k, v in fields.items():
+        patch.append({
+            "op": "add",
+            "path": f"/fields/{k}",
+            "value": v
+        })
+    return patch
+
+client = AzureOpenAI(
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    api_version="2024-12-01-preview",
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "")
+)
+
+def get_embedding(text: str) -> list[float]:
+    if not text:
+        return []
+    resp = client.embeddings.create(
+        model="text-embedding-ada-002",
+        input=text
+    )
+    return resp.data[0].embedding
+
+AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_API_KEY = os.getenv("AZURE_SEARCH_API_KEY")
+AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX")
+def index_work_item(doc: dict):
+    url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{AZURE_SEARCH_INDEX}/docs/search.index?api-version=2024-07-01"
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": AZURE_SEARCH_API_KEY
+    }
+    doc["@search.action"] = "mergeOrUpload"
+    resp = requests.post(url, headers=headers, json={"value": [doc]})
+    resp.raise_for_status()
+    return resp.json()
+
 
 fapi_app = fastapi.FastAPI(
     title="Azure DevOps Boards WIQL API",
@@ -315,4 +380,97 @@ def azure_board_query(req: WIQLRequestBody, username: str = Depends(authenticate
     return Response(header=[allowed_fields[h]['title'] for h in sorted_fields],
                     values=work_items)
     
+
+
+@fapi_app.post(
+    "/v1/workitems",
+    tags=["Azure Boards WIQL"],
+    summary="Creates a work item in Azure DevOps",
+    response_model=Dict[str, Any]
+)
+def create_work_item(body: CreateWorkItemBody, username: str = Depends(authenticate)) -> Dict[str, Any]:
+    # Resolve organization and project
+    org = body.organization or os.getenv("ADO_TARGET_ORGANIZATION", "elobr")
+    project = body.project or os.getenv("ADO_TARGET_PROJECT", "ELO%20AI%20Agents%20User%20Story")
+    base_url = os.getenv("ADO_BASE_URL", "https://dev.azure.com/")
+
+    logger.info(f"Creating work item in org '{org}' and project '{project}'")
+    patch_doc = build_patch_document(body.fields)
+
+    if "Custom.BacklogItemType" not in body.fields:
+        patch_doc.append({
+            "op": "add",
+            "path": "/fields/Custom.BacklogItemType",
+            "value": "Planned"
+        })
+
+    # If description provided but not already present
+    if body.description and "System.Description" not in body.fields:
+        patch_doc.append({"op": "add", "path": "/fields/System.Description", "value": body.description})
+
+    # Add AreaPath if provided
+    if body.area_path:
+        patch_doc.append({"op": "add", "path": "/fields/System.AreaPath", "value": body.area_path})
+
+    # If parent provided, add relation
+    if body.parent_id:
+        parent_url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workItems/{body.parent_id}"
+        patch_doc.append({
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": "System.LinkTypes.Hierarchy-Reverse",
+                "url": parent_url,
+                "attributes": { "comment": "Linked to parent container" }
+            }
+        })
+
+    logger.info(f"Creating work item in project '{project}' of type '{body.work_item_type}' with fields: {body.fields.keys()}")
+    
+     # Construct URL
+    url = f"{base_url}{org}/{project}/_apis/wit/workitems/${body.work_item_type}".replace(' ', '%20')
+
+    headers = {
+        "Content-Type": "application/json-patch+json",
+        "Authorization": f"Basic {os.getenv('ADO_TOKEN')}"
+    }
+
+    params = {
+        'api-version': '7.1',
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        params=params,
+        data=json.dumps(patch_doc)
+    )
+
+    if response.status_code not in (200, 201):
+        logger.error(f"Failed to create work item: {response.status_code} - {response.text} - {url}")
+        raise Exception(f"Failed to create work item: {response.text}")
+
+    created = response.json()
+    logger.info(f"Created work item: ID={created.get('id')}, URL={created.get('url')}")
+    if body.index:
+        try:
+            doc = {
+                "id": str(created.get('id')),
+                "url": created.get('url'),
+                "title": created.get('fields', {}).get('System.Title', ''),
+                "description": created.get('fields', {}).get('System.Description', ''),
+                "areaPath": created.get('fields', {}).get('System.AreaPath', ''),
+                "embedding": get_embedding(
+                    created.get('fields', {}).get('System.Title', '') +
+                    "\n" +
+                    created.get('fields', {}).get('System.Description', '')
+                )
+            }
+            logger.info(f"Embedding dimension is {len(doc['embedding'])}!!")
+            index_resp = index_work_item(doc)
+            logger.info(f"Indexed work item {doc['id']} in Azure Search: {index_resp}")
+        except Exception as e:
+            logger.error(f"Error indexing work item {created['id']}: {e}")
+    return {"id": getattr(created, 'id', ''), "url": getattr(created, 'url', '')}
+
 app = func.AsgiFunctionApp(app=fapi_app, http_auth_level=func.AuthLevel.ANONYMOUS)
